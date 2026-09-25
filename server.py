@@ -16,9 +16,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from backtest import direction_of, get_price_change, get_smart_money_flow
-
-CHAINS = ["ethereum", "base", "arbitrum", "optimism", "polygon", "bnb", "avalanche", "solana"]
+from backtest import SUPPORTED_CHAINS, evaluate, get_price_change, get_smart_money_flow
 
 STYLE = """
 :root { --bg:#f6f7f9; --card:#fff; --text:#1a1d21; --muted:#6b7280; --border:#e5e7eb;
@@ -72,7 +70,7 @@ def form_html(values: dict | None = None) -> str:
     v = values or {}
     esc = lambda k, d="": html.escape(v.get(k, d), quote=True)
     predicted = v.get("predicted", "")
-    chain_opts = "".join(f'<option value="{c}">' for c in CHAINS)
+    chain_opts = "".join(f'<option value="{c}">' for c in SUPPORTED_CHAINS)
     pred_opts = "".join(
         f'<option value="{val}"{" selected" if val == predicted else ""}>{label}</option>'
         for val, label in [("", "— none —"), ("up", "up"), ("down", "down")]
@@ -98,7 +96,7 @@ def form_html(values: dict | None = None) -> str:
 
 def fmt_usd(value) -> str:
     if value is None:
-        return "—"
+        return "n/a (no data for this window)"
     cls = "pos" if value > 0 else "neg" if value < 0 else ""
     return f'<span class="{cls}">${value:,.0f}</span>'
 
@@ -121,30 +119,29 @@ def result_html(params: dict) -> str:
         raise ValueError("Horizon must be at least 1 day.")
     if predicted not in (None, "up", "down"):
         raise ValueError("Predicted direction must be up or down.")
+    if chain not in SUPPORTED_CHAINS:
+        raise ValueError(f"Chain must be one of {', '.join(SUPPORTED_CHAINS)} (the historical endpoints only cover these).")
 
     end = alert_time + timedelta(days=horizon_days)
     price = get_price_change(chain, token, alert_time, end)
     flow = get_smart_money_flow(chain, token, alert_time, end)
+    v = evaluate(price, flow, predicted)
 
     rows = [
         ("Token", f'<span class="mono">{html.escape(token)}</span> ({html.escape(chain)})'),
         ("Window", f"{alert_time.date()} → {end.date()} ({horizon_days}d)"),
     ]
 
-    price_dir = None
     if price["available"] and price["change_pct"] is not None:
         pct = price["change_pct"]
-        price_dir = "up" if pct > 0 else "down" if pct < 0 else "flat"
         cls = "pos" if pct > 0 else "neg" if pct < 0 else ""
         rows.append(("Price change", f'{price["price_start"]:.6g} → {price["price_end"]:.6g} '
                                      f'<strong class="{cls}">({pct:+.2f}%)</strong>'))
     else:
         rows.append(("Price change", "not available for this window"))
 
-    smart_dir = "unknown"
     if flow["available"]:
-        smart_dir = direction_of(flow["smart_trader_net_flow_usd"])
-        rows.append(("Smart money flow", f'{fmt_usd(flow["smart_trader_net_flow_usd"])} net → {smart_dir}'))
+        rows.append(("Smart money flow", f'{fmt_usd(flow["smart_trader_net_flow_usd"])} net → {v["smart_dir"]}'))
         rows.append(("Whale flow", f'{fmt_usd(flow["whale_net_flow_usd"])} net'))
         rows.append(("Exchange flow", f'{fmt_usd(flow["exchange_net_flow_usd"])} net'))
     else:
@@ -152,22 +149,20 @@ def result_html(params: dict) -> str:
 
     table = "".join(f"<tr><td>{k}</td><td class='num'>{v}</td></tr>" for k, v in rows)
 
-    if price_dir and flow["available"]:
-        confirmed = (smart_dir == "buying" and price_dir == "up") or (smart_dir == "selling" and price_dir == "down")
-        verdict = (
-            '<div class="verdict ok">CONFIRMED — smart money agreed with the price move</div>'
-            if confirmed
-            else '<div class="verdict no">NOT confirmed — smart money went against the price move</div>'
-        )
-        if predicted:
-            agrees = (predicted == "up" and smart_dir == "buying") or (predicted == "down" and smart_dir == "selling")
-            verdict += (
-                f'<table style="margin-top:12px"><tr><td>Your alert said</td><td>{predicted}</td></tr>'
-                f'<tr><td>Smart money</td><td><strong class="{"pos" if agrees else "neg"}">'
-                f'{"agrees" if agrees else "disagrees"}</strong> with your alert</td></tr></table>'
-            )
+    if v["confirmed"] is None:
+        verdict = '<div class="verdict na">NO VERDICT — price or smart-money signal missing/flat</div>'
+    elif v["confirmed"]:
+        verdict = '<div class="verdict ok">CONFIRMED — smart money agreed with the price move</div>'
     else:
-        verdict = '<div class="verdict na">No verdict — price or smart money data missing for this window.</div>'
+        verdict = '<div class="verdict no">NOT confirmed — smart money went against the price move</div>'
+    if predicted:
+        verdict += f'<table style="margin-top:12px"><tr><td>Your alert said</td><td>{predicted}</td></tr>'
+        if v["agrees"] is not None:
+            verdict += (
+                f'<tr><td>Smart money</td><td><strong class="{"pos" if v["agrees"] else "neg"}">'
+                f'{"agrees" if v["agrees"] else "disagrees"}</strong> with your alert</td></tr>'
+            )
+        verdict += "</table>"
 
     return f'<div class="card"><table>{table}</table></div><div class="card">{verdict}</div>'
 

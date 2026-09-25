@@ -33,11 +33,14 @@ python backtest.py --chain ethereum --token 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C
 
 | Flag             | Required | Default    | Meaning                                         |
 |------------------|----------|------------|-------------------------------------------------|
-| `--token`        | yes      |            | Token contract address                          |
-| `--date`         | yes      |            | Alert / snapshot date, `YYYY-MM-DD` (UTC)       |
-| `--chain`        | no       | `ethereum` | Chain the token lives on                        |
+| `--token`        | yes¹     |            | Token contract address                          |
+| `--date`         | yes¹     |            | Alert / snapshot date, `YYYY-MM-DD` (UTC)       |
+| `--chain`        | no       | `ethereum` | Chain the token lives on — see [Supported chains](#supported-chains) |
 | `--horizon-days` | no       | `1`        | How many days forward to check                  |
 | `--predicted`    | no       |            | What your alert predicted: `up` or `down`       |
+| `--batch`        | no       |            | CSV of alerts to backtest at once — see [Batch mode](#batch-mode) |
+
+¹ Not needed with `--batch`.
 
 Example output:
 
@@ -52,7 +55,57 @@ Exchange flow:     $... net
 Verdict:           CONFIRMED — smart money agreed with the price move
 Your alert said:   up
 Smart money says:  agrees with your alert
+
+Nansen API calls:  2
 ```
+
+If the price didn't move, smart money was flat, or either data source has nothing for the window, the verdict is `NO VERDICT — price or smart-money signal missing/flat` instead of a guess.
+
+## Batch mode
+
+Backtest a whole alert history in one go and get a hit-rate scorecard:
+
+```bash
+python backtest.py --batch examples_alerts.csv
+```
+
+The CSV needs a header row. `date` and `token` are required; the rest are optional per row and fall back to `--chain` / `--horizon-days` / no prediction:
+
+```csv
+date,token,chain,horizon_days,predicted
+2026-08-01,0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2,ethereum,7,up
+2026-08-15,0x514910771AF9Ca656af840dff83E8264EcF986CA,ethereum,7,up
+2026-09-01,0x514910771AF9Ca656af840dff83E8264EcF986CA,ethereum,7,down
+```
+
+A ready-to-run example is in [`examples_alerts.csv`](examples_alerts.csv).
+
+Output is one line per alert, then a scorecard:
+
+```
+date        chain     token             price         smart$ verdict    alert  SM agrees
+2026-08-01  ethereum  0xC02aaA39b2..    +x.x%        ...      CONFIRMED  up     yes
+...
+
+Smart money confirmed the move:  x/y (..%)
+Your alerts were right:          x/y (..%)
+  ...when smart money agreed:    x/y (..%)
+  ...when smart money disagreed: x/y (..%)
+
+Nansen API calls:  6
+```
+
+- **Smart money confirmed the move** — how often smart-money flow pointed the same way as the price.
+- **Your alerts were right** — how often your `predicted` direction matched the actual price move.
+- **...when smart money agreed / disagreed** — your hit rate split by whether smart money backed your alert. If the "agreed" rate is clearly higher, smart money is a useful filter for your alerts.
+
+Rows with no verdict (missing or flat data) are left out of the rates. Each alert costs 2 API calls; the total is printed at the end.
+
+## Supported chains
+
+`ethereum`, `base`, `bnb`, `solana`.
+
+These are the chains the two historical endpoints (`historical-token-ohlcv` and `historical-token-flow-summary`) cover. Any other `--chain` value is rejected up front rather than failing at the API. The web UI uses the same list.
 
 ## Web UI
 
@@ -73,7 +126,7 @@ Two Nansen API calls (`POST`, `apikey` header):
 - `/api/v1beta1/tgm/historical-token-ohlcv` — daily candles; price change = first open → last close.
 - `/api/v1beta1/tgm/historical-token-flow-summary` — net USD flow of smart traders, whales and exchanges over the window.
 
-Verdict: **confirmed** when smart money was net buying and price went up, or net selling and price went down. Otherwise **not confirmed**.
+Verdict: **confirmed** when smart money was net buying and price went up, or net selling and price went down; **not confirmed** when they point in opposite directions; **no verdict** when either side is missing or flat.
 
 ## License
 
